@@ -1,0 +1,22 @@
+# Step template: installs a pinned Terraform version on the agent.
+# Every stage runs on a fresh agent, so each one needs it.
+# Pinned to the version used locally, so plans match across laptop and pipeline.
+parameters:
+  - name: version
+    type: string
+    default: "1.15.2"
+
+steps:
+  - bash: |
+      set -euo pipefail
+      dir="$(Agent.ToolsDirectory)/terraform/${{ parameters.version }}"
+      mkdir -p "$dir"
+      curl -fsSLo /tmp/terraform.zip \
+        "https://releases.hashicorp.com/terraform/${{ parameters.version }}/terraform_${{ parameters.version }}_linux_amd64.zip"
+      unzip -oq /tmp/terraform.zip -d "$dir"
+      # Put it first on PATH for every later step in this job.
+      echo "##vso[task.prependpath]$dir"
+    displayName: Install Terraform ${{ parameters.version }}
+
+  - bash: terraform version
+    displayName: Show Terraform version
