@@ -112,7 +112,7 @@ INDEX_PAGE = """
             <a href="/healthcheck" class="primary">Healthcheck</a>
             <a href="/login" class="secondary">Login</a>
         </div>
-        <span class="badge">Ayomide Giwa — DevOps Learning Project</span>
+        <span class="badge">Ayomide Giwa — DevOps Project</span>
     </div>
 </body>
 </html>
