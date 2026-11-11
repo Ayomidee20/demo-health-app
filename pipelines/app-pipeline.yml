@@ -1,0 +1,2 @@
+# TODO: lint → test → scan → docker build → push to ACR → deploy to ACA → health check
+# See the project roadmap Phase 5
