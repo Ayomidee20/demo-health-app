@@ -88,12 +88,20 @@ resource "azurerm_container_app_environment" "main" {
   # Container stdout/stderr and system logs go to Log Analytics.
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
 
+  # Azure now creates every environment with a built-in "Consumption"
+  # (serverless, pay-per-use) profile. Declaring it stops Terraform from
+  # trying to remove it on every plan.
+  workload_profile {
+    name                  = "Consumption"
+    workload_profile_type = "Consumption"
+  }
+
   tags = local.tags
 }
 
 # ---------- Key Vault: holds the Flask secret key (like SSM Parameter Store SecureString) ----------
 
-# Who is running Terraform: you locally, or the pipeline's service connection.
+# Who is running Terraform. Only its tenant_id is used (for the vault).
 data "azurerm_client_config" "current" {}
 
 resource "azurerm_key_vault" "main" {
@@ -115,13 +123,24 @@ resource "azurerm_key_vault" "main" {
   tags = local.tags
 }
 
-# Whoever runs Terraform may create/update secrets (needed to create the
-# placeholder secret below). Data-plane role: Contributor alone can't read or
-# write secret values.
-resource "azurerm_role_assignment" "terraform_kv_secrets_officer" {
+# Everyone who runs Terraform (you locally, the pipeline in ADO) may manage
+# secrets: plan reads the secret on every refresh and apply writes the
+# placeholder. Data-plane role: Contributor alone can't read or write secret
+# values. A fixed list (not "whoever runs it") so a local run and a pipeline
+# run don't keep swapping the assignment between each other.
+resource "azurerm_role_assignment" "kv_secrets_officers" {
+  for_each = var.kv_secrets_officers
+
   scope                = azurerm_key_vault.main.id
   role_definition_name = "Key Vault Secrets Officer"
-  principal_id         = data.azurerm_client_config.current.object_id
+  principal_id         = each.value
+}
+
+# The single assignment that existed before (you) becomes the "local_user"
+# entry, so Terraform renames it in state instead of deleting and recreating it.
+moved {
+  from = azurerm_role_assignment.terraform_kv_secrets_officer
+  to   = azurerm_role_assignment.kv_secrets_officers["local_user"]
 }
 
 # The app's identity may only read secret values.
@@ -138,7 +157,7 @@ resource "time_sleep" "wait_for_kv_roles" {
   create_duration = "90s"
 
   depends_on = [
-    azurerm_role_assignment.terraform_kv_secrets_officer,
+    azurerm_role_assignment.kv_secrets_officers,
     azurerm_role_assignment.app_kv_secrets_user,
   ]
 }
@@ -152,7 +171,9 @@ resource "azurerm_key_vault_secret" "flask_secret_key" {
   key_vault_id = azurerm_key_vault.main.id
 
   lifecycle {
-    ignore_changes = [value]
+    # value: set by hand. tags: `az keyvault secret set` adds
+    # "file-encoding = utf-8", which Terraform would otherwise strip.
+    ignore_changes = [value, tags]
   }
 
   depends_on = [time_sleep.wait_for_kv_roles]
@@ -168,6 +189,9 @@ resource "azurerm_container_app" "main" {
 
   # One active revision at a time: a new deploy replaces the old one.
   revision_mode = "Single"
+
+  # Run on the environment's serverless Consumption profile (see above).
+  workload_profile_name = "Consumption"
 
   # Run as the managed identity that has AcrPull...
   identity {

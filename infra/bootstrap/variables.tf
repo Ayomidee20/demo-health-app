@@ -42,3 +42,9 @@ variable "tags" {
     managed_by = "terraform-bootstrap"
   }
 }
+
+variable "pipeline_principal_id" {
+  description = "Object ID of the pipeline's service principal (sp-healthapp-ado), used by the ADO service connection sc-healthapp-azure."
+  type        = string
+  default     = "af54ca36-0f95-4a72-bcf4-b4a175ced35b"
+}
