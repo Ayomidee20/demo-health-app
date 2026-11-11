@@ -1,0 +1,10 @@
+# Keep the build context small and free of local junk and secrets.
+.git
+**/__pycache__
+**/*.pyc
+.venv
+venv
+infra
+pipelines
+tests
+*.md

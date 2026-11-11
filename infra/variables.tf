@@ -73,3 +73,12 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "kv_secrets_officers" {
+  description = "Object IDs that may manage Key Vault secrets: everyone who runs Terraform."
+  type        = map(string)
+  default = {
+    local_user = "d90e891b-6415-4e37-9973-7032f7819ce2" # you (az login)
+    pipeline   = "af54ca36-0f95-4a72-bcf4-b4a175ced35b" # sp-healthapp-ado (sc-healthapp-azure)
+  }
+}

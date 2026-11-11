@@ -202,4 +202,6 @@ LOGIN_PAGE = """
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
-    app.run(host="0.0.0.0", port=port)
+    # Must listen on all interfaces inside a container. Only used locally;
+    # in the image gunicorn binds instead.
+    app.run(host="0.0.0.0", port=port)  # nosec B104

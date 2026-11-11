@@ -1,2 +1,174 @@
-# TODO: Terraform validate → plan → approval gate → apply/destroy
-# See the project roadmap Phase 3
+# Infra pipeline: Validate -> Plan -> (human approval) -> Apply
+#
+# - Push to main touching infra/  : full run for the chosen environment (dev by default)
+# - Pull request touching infra/  : Validate + Plan only, never applies
+# - Manual run                    : pick environment (dev/prod) and action (apply/destroy)
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [infra/*]
+    exclude: [infra/bootstrap/*] # bootstrap is applied once, locally
+
+pr:
+  branches:
+    include: [main]
+  paths:
+    include: [infra/*]
+    exclude: [infra/bootstrap/*]
+
+parameters:
+  - name: environment
+    displayName: Environment
+    type: string
+    default: dev
+    values: [dev, prod]
+  - name: action
+    displayName: Action
+    type: string
+    default: apply
+    values: [apply, destroy]
+
+variables:
+  # Name of the Azure Resource Manager service connection in Azure DevOps.
+  serviceConnection: sc-healthapp-azure
+  tfDir: $(System.DefaultWorkingDirectory)/infra
+  # Option 1 from Phase 2: one state file + one tfvars per environment.
+  stateKey: ${{ parameters.environment }}.tfstate
+  varFile: env/${{ parameters.environment }}.tfvars
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  # ---------------------------------------------------------------- Validate
+  # No Azure access needed: catches formatting and syntax errors cheaply.
+  - stage: Validate
+    jobs:
+      - job: validate
+        steps:
+          - template: templates/install-terraform.yml
+
+          - bash: terraform fmt -check -recursive -diff
+            workingDirectory: $(tfDir)
+            displayName: terraform fmt -check
+
+          - bash: |
+              set -euo pipefail
+              terraform init -input=false -backend=false
+              terraform validate
+            workingDirectory: $(tfDir)
+            displayName: terraform validate
+
+  # -------------------------------------------------------------------- Plan
+  - stage: Plan
+    displayName: Plan (${{ parameters.environment }}, ${{ parameters.action }})
+    dependsOn: Validate
+    jobs:
+      - job: plan
+        steps:
+          - template: templates/install-terraform.yml
+
+          - task: AzureCLI@2
+            name: planStep # referenced by the Apply stage's condition
+            displayName: terraform plan
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: $(tfDir)
+              # Exposes the service connection's identity to this script as
+              # $servicePrincipalId, $tenantId and $idToken (an OIDC token).
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+
+                # Workload identity federation: Terraform signs in with the
+                # short-lived OIDC token. No client secret exists anywhere.
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_OIDC_TOKEN="$idToken"
+                export ARM_USE_OIDC=true
+
+                terraform init -input=false -backend-config="key=$(stateKey)"
+
+                flags=""
+                if [ "${{ parameters.action }}" = "destroy" ]; then flags="-destroy"; fi
+
+                # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes.
+                set +e
+                terraform plan -input=false -var-file="$(varFile)" $flags \
+                  -out=tfplan -detailed-exitcode
+                code=$?
+                set -e
+
+                if [ "$code" -eq 1 ]; then exit 1; fi
+                if [ "$code" -eq 2 ]; then hasChanges=true; else hasChanges=false; fi
+                echo "##vso[task.setvariable variable=hasChanges;isOutput=true]$hasChanges"
+
+                # Human-readable copy for whoever approves the apply.
+                terraform show -no-color tfplan > tfplan.txt
+
+          - bash: cp tfplan tfplan.txt "$(Build.ArtifactStagingDirectory)/"
+            workingDirectory: $(tfDir)
+            displayName: Stage plan files
+
+          - publish: $(Build.ArtifactStagingDirectory)
+            artifact: tfplan
+            displayName: Publish plan artifact
+
+  # ------------------------------------------------------------------- Apply
+  - stage: Apply
+    displayName: Apply (${{ parameters.environment }}, ${{ parameters.action }})
+    dependsOn: Plan
+    # Skip on pull requests, and skip when the plan has nothing to change
+    # (no point asking a human to approve "0 to add, 0 to change").
+    condition: >-
+      and(
+        succeeded(),
+        ne(variables['Build.Reason'], 'PullRequest'),
+        eq(dependencies.Plan.outputs['plan.planStep.hasChanges'], 'true')
+      )
+    jobs:
+      # A deployment job targets an Azure DevOps Environment. The Approvals
+      # check configured on that Environment is the human gate: the job waits
+      # here until someone approves (like a CodePipeline manual approval).
+      - deployment: apply
+        environment: healthapp-${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # Deployment jobs don't check out code by default.
+                - checkout: self
+
+                - download: current
+                  artifact: tfplan
+                  displayName: Download plan artifact
+
+                - template: templates/install-terraform.yml
+
+                - task: AzureCLI@2
+                  displayName: terraform apply
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    workingDirectory: $(tfDir)
+                    addSpnToEnvironment: true
+                    inlineScript: |
+                      set -euo pipefail
+
+                      export ARM_CLIENT_ID="$servicePrincipalId"
+                      export ARM_TENANT_ID="$tenantId"
+                      export ARM_OIDC_TOKEN="$idToken"
+                      export ARM_USE_OIDC=true
+
+                      # Fresh agent: init again against the same state file.
+                      terraform init -input=false -backend-config="key=$(stateKey)"
+
+                      # Apply exactly the plan that was approved. A saved plan
+                      # already knows if it is a destroy, and Terraform refuses
+                      # it if the state changed since it was made.
+                      terraform apply -input=false "$(Pipeline.Workspace)/tfplan/tfplan"

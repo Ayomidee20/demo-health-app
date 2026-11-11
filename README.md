@@ -24,14 +24,14 @@ infra/
 pipelines/
   infra-pipeline.yml  # Terraform plan/apply with approval gate
   app-pipeline.yml    # Build, push, deploy, health check
-Dockerfile            # Multi-stage: test in build, gunicorn in prod
+Dockerfile            # Runtime image: gunicorn, non-root (tests run in the pipeline)
 ```
 
 ## Local development
 
 ```bash
 # Install deps
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
 # Run tests
 python -m pytest tests/ -v

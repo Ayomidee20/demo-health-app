@@ -88,14 +88,95 @@ resource "azurerm_container_app_environment" "main" {
   # Container stdout/stderr and system logs go to Log Analytics.
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
 
+  # Azure now creates every environment with a built-in "Consumption"
+  # (serverless, pay-per-use) profile. Declaring it stops Terraform from
+  # trying to remove it on every plan.
+  workload_profile {
+    name                  = "Consumption"
+    workload_profile_type = "Consumption"
+  }
+
   tags = local.tags
 }
 
-# ---------- Flask secret key: generated here, never typed or baked into the image ----------
+# ---------- Key Vault: holds the Flask secret key (like SSM Parameter Store SecureString) ----------
 
-resource "random_password" "flask_secret_key" {
-  length  = 48
-  special = false
+# Who is running Terraform. Only its tenant_id is used (for the vault).
+data "azurerm_client_config" "current" {}
+
+resource "azurerm_key_vault" "main" {
+  # Global name, 3-24 chars. Reuses the ACR's random suffix: kv-healthapp-dev-pgcdm
+  name                = "kv-${local.name}-${random_string.acr_suffix.result}"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  tenant_id           = data.azurerm_client_config.current.tenant_id
+  sku_name            = "standard"
+
+  # Access is granted with Azure RBAC roles (like IAM), not legacy access policies.
+  rbac_authorization_enabled = true
+
+  # Short soft-delete window and no purge protection, so the environment can
+  # be destroyed and recreated freely. A real prod vault would enable purge protection.
+  soft_delete_retention_days = 7
+  purge_protection_enabled   = false
+
+  tags = local.tags
+}
+
+# Everyone who runs Terraform (you locally, the pipeline in ADO) may manage
+# secrets: plan reads the secret on every refresh and apply writes the
+# placeholder. Data-plane role: Contributor alone can't read or write secret
+# values. A fixed list (not "whoever runs it") so a local run and a pipeline
+# run don't keep swapping the assignment between each other.
+resource "azurerm_role_assignment" "kv_secrets_officers" {
+  for_each = var.kv_secrets_officers
+
+  scope                = azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = each.value
+}
+
+# The single assignment that existed before (you) becomes the "local_user"
+# entry, so Terraform renames it in state instead of deleting and recreating it.
+moved {
+  from = azurerm_role_assignment.terraform_kv_secrets_officer
+  to   = azurerm_role_assignment.kv_secrets_officers["local_user"]
+}
+
+# The app's identity may only read secret values.
+resource "azurerm_role_assignment" "app_kv_secrets_user" {
+  scope                = azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_user_assigned_identity.app.principal_id
+  principal_type       = "ServicePrincipal"
+}
+
+# New role assignments take a minute or two to take effect. Without this
+# pause, creating the secret (or the app reading it) fails with a 403.
+resource "time_sleep" "wait_for_kv_roles" {
+  create_duration = "90s"
+
+  depends_on = [
+    azurerm_role_assignment.kv_secrets_officers,
+    azurerm_role_assignment.app_kv_secrets_user,
+  ]
+}
+
+# Terraform creates the secret with a dummy value and then ignores its value
+# forever. The real value is set by hand (az keyvault secret set), so it never
+# appears in Terraform state, a plan file, the pipeline or the repo.
+resource "azurerm_key_vault_secret" "flask_secret_key" {
+  name         = "flask-secret-key"
+  value        = "replace-me-outside-terraform"
+  key_vault_id = azurerm_key_vault.main.id
+
+  lifecycle {
+    # value: set by hand. tags: `az keyvault secret set` adds
+    # "file-encoding = utf-8", which Terraform would otherwise strip.
+    ignore_changes = [value, tags]
+  }
+
+  depends_on = [time_sleep.wait_for_kv_roles]
 }
 
 # ---------- The app itself (like an ECS service + ALB) ----------
@@ -109,6 +190,9 @@ resource "azurerm_container_app" "main" {
   # One active revision at a time: a new deploy replaces the old one.
   revision_mode = "Single"
 
+  # Run on the environment's serverless Consumption profile (see above).
+  workload_profile_name = "Consumption"
+
   # Run as the managed identity that has AcrPull...
   identity {
     type         = "UserAssigned"
@@ -121,10 +205,14 @@ resource "azurerm_container_app" "main" {
     identity = azurerm_user_assigned_identity.app.id
   }
 
-  # Stored encrypted by Container Apps; exposed to the container as an env var below.
+  # A reference, not a value: Container Apps fetches the secret from Key Vault
+  # with the app's identity (like ECS "valueFrom" pointing at Parameter Store).
+  # versionless_id = always the latest version, so updating it in Key Vault
+  # needs no Terraform change.
   secret {
-    name  = "flask-secret-key"
-    value = random_password.flask_secret_key.result
+    name                = "flask-secret-key"
+    key_vault_secret_id = azurerm_key_vault_secret.flask_secret_key.versionless_id
+    identity            = azurerm_user_assigned_identity.app.id
   }
 
   ingress {
@@ -181,9 +269,13 @@ resource "azurerm_container_app" "main" {
     ignore_changes = [template[0].container[0].image]
   }
 
-  # Nothing above references the role assignment, so Terraform can't infer the
-  # order. Make sure AcrPull exists before the app can try to pull from ACR.
-  depends_on = [azurerm_role_assignment.app_acr_pull]
+  # Nothing above references these role assignments, so Terraform can't infer
+  # the order. AcrPull must exist before the app pulls from ACR, and the Key
+  # Vault read role must be active before the app fetches its secret.
+  depends_on = [
+    azurerm_role_assignment.app_acr_pull,
+    time_sleep.wait_for_kv_roles,
+  ]
 
   tags = local.tags
 }

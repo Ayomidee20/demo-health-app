@@ -1,2 +1,190 @@
-# TODO: lint → test → scan → docker build → push to ACR → deploy to ACA → health check
-# See the project roadmap Phase 5
+# App pipeline: CI -> Build (+ scan, push) -> Deploy (+ health check)
+#
+# - Push to main touching the app  : full run, deploys to dev
+# - Pull request                   : CI + Build + image scan only, never pushes or deploys
+# - Manual run                     : pick the environment (dev/prod)
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include:
+      - app/*
+      - tests/*
+      - Dockerfile
+      - requirements.txt
+      - requirements-dev.txt
+      - pipelines/app-pipeline.yml
+
+pr:
+  branches:
+    include: [main]
+  paths:
+    include:
+      - app/*
+      - tests/*
+      - Dockerfile
+      - requirements.txt
+      - requirements-dev.txt
+      - pipelines/app-pipeline.yml
+
+parameters:
+  - name: environment
+    displayName: Environment
+    type: string
+    default: dev
+    values: [dev, prod]
+
+variables:
+  serviceConnection: sc-healthapp-azure
+  pythonVersion: "3.12" # same as the Dockerfile base image
+  trivyVersion: "0.76.1"
+  imageRepo: healthapp
+  # Every image is tagged with the exact commit it was built from. Never "latest".
+  imageTag: $(Build.SourceVersion)
+  # Names follow the Terraform convention (rg-<project>-<env>, <project>-<env>).
+  resourceGroup: rg-healthapp-${{ parameters.environment }}
+  containerApp: healthapp-${{ parameters.environment }}
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  # ---------------------------------------------------------------------- CI
+  # Code-level checks. No Docker and no Azure access needed.
+  - stage: CI
+    jobs:
+      - job: checks
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+            displayName: Use Python $(pythonVersion)
+
+          - bash: pip install -r requirements-dev.txt
+            displayName: Install dependencies
+
+          - bash: flake8 app tests
+            displayName: Lint (flake8)
+
+          - bash: python -m pytest -v --junitxml=test-results.xml
+            displayName: Unit tests (pytest)
+
+          # Shows results in the run's "Tests" tab, even when tests fail.
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFiles: test-results.xml
+              testRunTitle: Unit tests
+
+          # Static analysis of our code. -ll = fail only on Medium or High
+          # severity; Low findings are expected (the git subprocess call).
+          - bash: bandit -r app -ll
+            displayName: Security lint (bandit)
+
+          # Known CVEs in the packages that ship in the image.
+          - bash: pip-audit -r requirements.txt
+            displayName: Dependency audit (pip-audit)
+
+  # ------------------------------------------------------------------- Build
+  - stage: Build
+    dependsOn: CI
+    jobs:
+      - job: build
+        steps:
+          - bash: |
+              docker build \
+                --build-arg COMMIT_SHA=$(Build.SourceVersion) \
+                -t $(imageRepo):$(imageTag) .
+            displayName: docker build
+
+          # Scan the built image (OS packages + Python packages) before it
+          # goes anywhere. Fails on HIGH/CRITICAL issues that have a fix.
+          - bash: |
+              docker run --rm \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                aquasec/trivy:$(trivyVersion) image \
+                  --exit-code 1 \
+                  --severity HIGH,CRITICAL \
+                  --ignore-unfixed \
+                  --no-progress \
+                  $(imageRepo):$(imageTag)
+            displayName: Image scan (trivy)
+
+          - task: AzureCLI@2
+            name: push # referenced by the Deploy stage
+            displayName: Push to ACR
+            condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                # The ACR name has a random suffix that changes every time the
+                # environment is recreated, so look it up instead of hardcoding it.
+                acr=$(az acr list -g "$(resourceGroup)" --query "[0].name" -o tsv)
+                loginServer=$(az acr show -n "$acr" --query loginServer -o tsv)
+
+                # Docker login to ACR with the service connection's identity.
+                az acr login -n "$acr"
+
+                image="$loginServer/$(imageRepo):$(imageTag)"
+                docker tag "$(imageRepo):$(imageTag)" "$image"
+                docker push "$image"
+
+                # Hand the exact image reference to the Deploy stage.
+                echo "##vso[task.setvariable variable=image;isOutput=true]$image"
+
+  # ------------------------------------------------------------------ Deploy
+  - stage: Deploy
+    displayName: Deploy (${{ parameters.environment }})
+    dependsOn: Build
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - deployment: deploy
+        # Add an Approvals check to healthapp-app-prod only; dev deploys straight away.
+        environment: healthapp-app-${{ parameters.environment }}
+        variables:
+          image: $[ stageDependencies.Build.build.outputs['push.image'] ]
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: Deploy and health check
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+
+                      # Creates a new revision with the new image. Everything
+                      # else (secrets, probes, scaling) stays as Terraform set it.
+                      az containerapp update \
+                        -n "$(containerApp)" -g "$(resourceGroup)" \
+                        --container-name healthapp \
+                        --image "$(image)" \
+                        -o none
+
+                      fqdn=$(az containerapp show -n "$(containerApp)" -g "$(resourceGroup)" \
+                        --query properties.configuration.ingress.fqdn -o tsv)
+                      url="https://$fqdn/healthcheck"
+                      expected="$(Build.SourceVersion)"
+
+                      # "Deployed" isn't enough: wait until /healthcheck reports
+                      # the commit we just built. Up to 30 x 10s = 5 minutes.
+                      for i in $(seq 1 30); do
+                        sha=$(curl -fsS "$url" 2>/dev/null | jq -r '.last_commit_sha // empty' || true)
+                        if [ "$sha" = "$expected" ]; then
+                          echo "Healthy: $url is serving $expected"
+                          exit 0
+                        fi
+                        echo "Attempt $i: serving '${sha:-no response}', waiting for $expected"
+                        sleep 10
+                      done
+
+                      echo "##vso[task.logissue type=error]$url never reported $expected"
+                      exit 1

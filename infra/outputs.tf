@@ -19,6 +19,11 @@ output "container_app_name" {
   value       = azurerm_container_app.main.name
 }
 
+output "key_vault_name" {
+  description = "Set the real Flask key here: az keyvault secret set --vault-name <this> --name flask-secret-key ..."
+  value       = azurerm_key_vault.main.name
+}
+
 output "container_app_url" {
   value = "https://${azurerm_container_app.main.ingress[0].fqdn}"
 }
