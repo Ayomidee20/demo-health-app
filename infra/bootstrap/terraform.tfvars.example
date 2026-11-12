@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Terraform loads it
+# automatically.
+
+# az account show --query id -o tsv
+subscription_id = "<subscription-id>"
+
+# az ad sp list --display-name sp-healthapp-ado --query "[0].id" -o tsv
+pipeline_principal_id = "<pipeline-sp-object-id>"

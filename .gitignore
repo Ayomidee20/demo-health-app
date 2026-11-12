@@ -18,6 +18,11 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 # .terraform.lock.hcl is NOT ignored: commit it so every run uses the same provider builds.
+# Real subscription and object IDs live here; commit only the *.example copies.
+terraform.tfvars
+terraform.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
 
 # OS / editor
 .DS_Store

@@ -48,6 +48,25 @@ docker build --platform linux/amd64 --build-arg COMMIT_SHA=$(git rev-parse HEAD)
 docker run -p 3000:3000 healthapp
 ```
 
-## Author
+## Azure IDs (not committed)
 
-Ayomide Giwa — DevOps/Infrastructure Engineer
+The subscription ID and Entra object IDs aren't in the repo. The Terraform variables that need them have no defaults, so each run has to supply them:
+
+| Value | Terraform variable | Locally | Infra pipeline |
+|---|---|---|---|
+| Subscription ID | `subscription_id` (`infra/`, `infra/bootstrap/`) | `terraform.tfvars` | read from the service connection |
+| Your Entra user's object ID | `kv_secrets_officers.local_user` | `infra/terraform.tfvars` | pipeline variable `localUserObjectId` |
+| `sp-healthapp-ado` object ID | `kv_secrets_officers.pipeline`, `pipeline_principal_id` (bootstrap) | `terraform.tfvars` | pipeline variable `pipelineObjectId` |
+
+**Locally**, copy each example to `terraform.tfvars` (git-ignored, loaded automatically) and fill it in:
+
+```bash
+cp infra/terraform.tfvars.example infra/terraform.tfvars
+cp infra/bootstrap/terraform.tfvars.example infra/bootstrap/terraform.tfvars
+```
+
+The examples list the `az` command that prints each value. `TF_VAR_<name>` environment variables work too.
+
+**In Azure DevOps**, add `localUserObjectId` and `pipelineObjectId` as variables on the infra pipeline (Edit → Variables). The Plan step stops with an error if either is missing. Apply runs the saved plan, so it needs nothing extra.
+
+[`scripts/create-service-connection.sh`](scripts/create-service-connection.sh) looks up the tenant, subscription and app registration from your `az login` session.
