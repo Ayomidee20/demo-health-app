@@ -1,7 +1,13 @@
+# No default: the repo is public, so IDs come from a git-ignored
+# terraform.tfvars (see terraform.tfvars.example).
 variable "subscription_id" {
   description = "Azure subscription that holds the Terraform state storage."
   type        = string
-  default     = "651d3386-8e30-4607-abfc-b1817d173f84"
+
+  validation {
+    condition     = can(regex("^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$", var.subscription_id))
+    error_message = "subscription_id must be a subscription ID (a GUID)."
+  }
 }
 
 variable "location" {
@@ -46,5 +52,9 @@ variable "tags" {
 variable "pipeline_principal_id" {
   description = "Object ID of the pipeline's service principal (sp-healthapp-ado), used by the ADO service connection sc-healthapp-azure."
   type        = string
-  default     = "af54ca36-0f95-4a72-bcf4-b4a175ced35b"
+
+  validation {
+    condition     = can(regex("^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$", var.pipeline_principal_id))
+    error_message = "pipeline_principal_id must be an Entra object ID (a GUID)."
+  }
 }

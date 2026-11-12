@@ -91,6 +91,22 @@ stages:
                 export ARM_OIDC_TOKEN="$idToken"
                 export ARM_USE_OIDC=true
 
+                # The Azure IDs aren't in the (public) repo. The subscription
+                # is the service connection's; the Key Vault secret officers
+                # come from the pipeline variables mapped in env below.
+                guid='^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+                require_id() {
+                  [[ "$2" =~ $guid ]] && return 0
+                  echo "##vso[task.logissue type=error]Pipeline variable $1 is missing or not an Entra object ID."
+                  exit 1
+                }
+                require_id localUserObjectId "$LOCAL_USER_OBJECT_ID"
+                require_id pipelineObjectId "$PIPELINE_OBJECT_ID"
+
+                subscription=$(az account show --query id -o tsv)
+                export TF_VAR_subscription_id="$subscription"
+                export TF_VAR_kv_secrets_officers="{ local_user = \"$LOCAL_USER_OBJECT_ID\", pipeline = \"$PIPELINE_OBJECT_ID\" }"
+
                 terraform init -input=false -backend-config="key=$(stateKey)"
 
                 flags=""
@@ -109,6 +125,12 @@ stages:
 
                 # Human-readable copy for whoever approves the apply.
                 terraform show -no-color tfplan > tfplan.txt
+            # Pipeline variables (Edit > Variables), not YAML: their values
+            # stay out of the repo. Mapped explicitly so secret variables work too.
+            # The Apply stage needs neither: the saved plan carries the values.
+            env:
+              LOCAL_USER_OBJECT_ID: $(localUserObjectId)
+              PIPELINE_OBJECT_ID: $(pipelineObjectId)
 
           - bash: cp tfplan tfplan.txt "$(Build.ArtifactStagingDirectory)/"
             workingDirectory: $(tfDir)

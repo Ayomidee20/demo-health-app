@@ -1,7 +1,14 @@
+# No default: the repo is public, so IDs come from a git-ignored
+# terraform.tfvars locally (see terraform.tfvars.example) and from the
+# service connection / pipeline variables in the infra pipeline.
 variable "subscription_id" {
   description = "Azure subscription to deploy into."
   type        = string
-  default     = "651d3386-8e30-4607-abfc-b1817d173f84"
+
+  validation {
+    condition     = can(regex("^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$", var.subscription_id))
+    error_message = "subscription_id must be a subscription ID (a GUID)."
+  }
 }
 
 variable "environment" {
@@ -74,11 +81,18 @@ variable "tags" {
   default     = {}
 }
 
+# Keys: local_user (you, az login) and pipeline (sp-healthapp-ado, behind the
+# sc-healthapp-azure service connection). Keep the keys: they are the role
+# assignments' addresses in state. No default, like subscription_id.
 variable "kv_secrets_officers" {
   description = "Object IDs that may manage Key Vault secrets: everyone who runs Terraform."
   type        = map(string)
-  default = {
-    local_user = "d90e891b-6415-4e37-9973-7032f7819ce2" # you (az login)
-    pipeline   = "af54ca36-0f95-4a72-bcf4-b4a175ced35b" # sp-healthapp-ado (sc-healthapp-azure)
+
+  validation {
+    condition = alltrue([
+      for id in values(var.kv_secrets_officers) :
+      can(regex("^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$", id))
+    ])
+    error_message = "Every kv_secrets_officers value must be an Entra object ID (a GUID)."
   }
 }

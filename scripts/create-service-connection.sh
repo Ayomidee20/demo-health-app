@@ -5,15 +5,21 @@
 #
 # Needs a PAT with scope "Service Connections: Read, query & manage".
 # The PAT is read silently and never written to disk.
+#
+# The Azure IDs aren't committed: they are looked up from your `az login`
+# session. Set SUBSCRIPTION_ID or CLIENT_ID to override the lookup.
 set -euo pipefail
 
 ORG="ayomidegiwaa"
 PROJECT="DevOps"
 NAME="sc-healthapp-azure"
-TENANT_ID="18d75181-a1df-4fc2-bb50-7e1b2990a11a"
-CLIENT_ID="73100a08-c5f0-4d32-bf1e-e414bf6f5dfa" # app registration sp-healthapp-ado
-SUBSCRIPTION_ID="651d3386-8e30-4607-abfc-b1817d173f84"
-SUBSCRIPTION_NAME="Azure subscription 1"
+APP_NAME="sp-healthapp-ado" # the app registration the connection signs in as
+
+SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-$(az account show --query id -o tsv)}"
+SUBSCRIPTION_NAME=$(az account show -s "$SUBSCRIPTION_ID" --query name -o tsv)
+TENANT_ID=$(az account show -s "$SUBSCRIPTION_ID" --query tenantId -o tsv)
+CLIENT_ID="${CLIENT_ID:-$(az ad app list --display-name "$APP_NAME" --query "[0].appId" -o tsv)}"
+[ -n "$CLIENT_ID" ] || { echo "App registration $APP_NAME not found" >&2; exit 1; }
 
 read -rsp "Paste your Azure DevOps PAT (hidden): " PAT
 echo

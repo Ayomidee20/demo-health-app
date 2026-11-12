@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Terraform loads it
+# automatically, alongside -var-file=env/<env>.tfvars.
+#
+# The pipeline doesn't use this file: it reads the subscription from its
+# service connection and the object IDs from pipeline variables.
+
+# az account show --query id -o tsv
+subscription_id = "<subscription-id>"
+
+# Keep these two keys: they are the role assignments' addresses in state.
+kv_secrets_officers = {
+  # az ad signed-in-user show --query id -o tsv
+  local_user = "<your-user-object-id>"
+  # az ad sp list --display-name sp-healthapp-ado --query "[0].id" -o tsv
+  pipeline = "<pipeline-sp-object-id>"
+}
