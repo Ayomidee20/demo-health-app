@@ -70,7 +70,3 @@ The examples list the `az` command that prints each value. `TF_VAR_<name>` envir
 **In Azure DevOps**, add `localUserObjectId` and `pipelineObjectId` as variables on the infra pipeline (Edit → Variables). The Plan step stops with an error if either is missing. Apply runs the saved plan, so it needs nothing extra.
 
 [`scripts/create-service-connection.sh`](scripts/create-service-connection.sh) looks up the tenant, subscription and app registration from your `az login` session.
-
-## Author
-
-Ayomide Giwa — DevOps/Infrastructure Engineer
